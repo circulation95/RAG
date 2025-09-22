@@ -92,6 +92,7 @@ mypy = "1.*"
 pinecone = "5.*"
 wikipedia = "1.*"
 scikit-learn = "1.*"
+numpy = "<2"
 
 
 [build-system]

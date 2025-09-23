@@ -4,6 +4,10 @@ from langchain_core.prompts.chat import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_teddynote.prompts import load_prompt
+from langchain_community.document_loaders import PDFPlumberLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain import hub
 from langchain_teddynote import logging
 from dotenv import load_dotenv
@@ -20,10 +24,10 @@ if not os.path.exists(".cache"):
 # 파일 업로드 전용 폴더
 if not os.path.exists(".cache/files"):
     os.mkdir(".cache/files")
-    
+
 if not os.path.exists(".cache/embeddings"):
     os.mkdir(".cache/embeddings")
-    
+
 st.title("PDF 기반 QA💬")
 
 if "messages" not in st.session_state:
@@ -45,20 +49,45 @@ with st.sidebar:
         "프롬프트 옵션을 선택하세요",
         ("기본", "sns", "요약"),
     )
-    
+
     selected_model = st.selectbox(
         "모델을 선택하세요",
         ("gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"),
     )
 
 
+# 이전 대화를 출력
 def print_messages():
     for msg in st.session_state["messages"]:
         st.chat_message(msg.role).write(msg.content)
 
 
+# 새로운 메시지를 추가
 def add_message(role, content):
     st.session_state.messages.append(ChatMessage(role=role, content=content))
+
+def embed_file(file):
+    # 업로드한 파일을 캐시 디렉토리에 저장합니다.
+    file_content = file.read()
+    file_path = f".cache/files/{file.name}"
+    with open(file_path, "wb") as f:
+        f.write(file_content)
+
+    loader = PDFPlumberLoader(file_path)
+    docs = loader.load()
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=50)
+    split_documents = text_splitter.split_documents(docs)
+
+    embeddings = OpenAIEmbeddings()
+
+    vecotrstore = FAISS.from_documents(
+        documents=split_documents,
+        embedding=embeddings,
+    )
+
+    retriever = vecotrstore.as_retriever()
+    return retriever
 
 
 def create_chain(prompt_type=option):

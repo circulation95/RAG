@@ -7,6 +7,7 @@ from langchain_teddynote.prompts import load_prompt
 from langchain_community.document_loaders import PDFPlumberLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.runnables import RunnablePassthrough
 from langchain_community.vectorstores import FAISS
 from langchain import hub
 from langchain_teddynote import logging
@@ -66,6 +67,7 @@ def print_messages():
 def add_message(role, content):
     st.session_state.messages.append(ChatMessage(role=role, content=content))
 
+
 def embed_file(file):
     # 업로드한 파일을 캐시 디렉토리에 저장합니다.
     file_content = file.read()
@@ -90,20 +92,18 @@ def embed_file(file):
     return retriever
 
 
-def create_chain(prompt_type=option):
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", "당신은 친철한 ai 어시스턴트입니다."),
-            ("user", "#question:\n{question}"),
-        ]
-    )
-    if prompt_type == "sns":
-        prompt = load_prompt("prompts/sns.yaml", encoding="utf8")
-    elif prompt_type == "요약":
-        prompt = hub.pull("teddynote/chain-of-density-map-korean", refresh=True)
+def create_chain(retriever, model="gpt-4o"):
+    prompt = load_prompt("prompts/pdf-rag.yaml", encoding="utf8")
 
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
-    chain = prompt | llm | StrOutputParser()
+    llm = ChatOpenAI(model_name=model, temperature=0)
+
+    chain = (
+        {"context": retriever, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
     return chain
 
 

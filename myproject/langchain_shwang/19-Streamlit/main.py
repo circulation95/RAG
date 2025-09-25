@@ -39,7 +39,7 @@ if "chain" not in st.session_state:
     st.session_state["chain"] = None
 
 with st.sidebar:
-    clear = st.button("대화 초기화")
+    clear_btn = st.button("대화 초기화")
 
     uploaded_files = st.file_uploader(
         "PDF 파일 업로드",
@@ -107,15 +107,34 @@ def create_chain(retriever, model="gpt-4o"):
     return chain
 
 
+if uploaded_files:
+    retriever = embed_file(uploaded_files)
+    chain = create_chain(retriever, model_name=selected_model)
+    st.session_state["chain"] = chain
+
+if clear_btn:
+    st.session_state["messages"] = []
+
 print_messages()
+
 USER_INPUT = st.chat_input("질문을 입력하세요")
+
+warning_msg = st.empty()
 
 if USER_INPUT:
     # 여기에 챗GPT API 호출 코드를 추가하여 응답을 받아올 수 있습니다.
     st.chat_message("user").write(USER_INPUT)
-    chain = create_chain()
-    response = chain.invoke({"question": USER_INPUT})
-    st.chat_message("assistant").write(response)
 
+    response = chain.stream(USER_INPUT)
+    with st.chat_message("assistant"):
+
+        container = st.empty()
+
+        ai_answer = ""
+        for token in response:
+            ai_answer += token
+            container.markdown(ai_answer)
     add_message("user", USER_INPUT)
     add_message("assistant", response)
+else:
+    warning_msg.warning("파일을 업로드 해주세요.")

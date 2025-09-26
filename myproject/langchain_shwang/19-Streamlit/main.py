@@ -92,10 +92,10 @@ def embed_file(file):
     return retriever
 
 
-def create_chain(retriever, model="gpt-4o"):
+def create_chain(retriever, model_name="gpt-4o"):
     prompt = load_prompt("prompts/pdf-rag.yaml", encoding="utf8")
 
-    llm = ChatOpenAI(model_name=model, temperature=0)
+    llm = ChatOpenAI(model_name=model_name, temperature=0)
 
     chain = (
         {"context": retriever, "question": RunnablePassthrough()}
@@ -127,14 +127,14 @@ if USER_INPUT:
 
     response = chain.stream(USER_INPUT)
     with st.chat_message("assistant"):
-
         container = st.empty()
-
         ai_answer = ""
         for token in response:
             ai_answer += token
             container.markdown(ai_answer)
+
+    # 최종 문자열 저장
     add_message("user", USER_INPUT)
-    add_message("assistant", response)
+    add_message("assistant", ai_answer)
 else:
     warning_msg.warning("파일을 업로드 해주세요.")

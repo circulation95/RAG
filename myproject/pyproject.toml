@@ -98,3 +98,7 @@ numpy = "<2"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+
+[tool.poetry.scripts]
+app = "streamlit.web.cli:main"

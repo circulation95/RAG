@@ -93,7 +93,7 @@ def embed_file(file):
 
 
 def create_chain(retriever, model_name="gpt-4o"):
-    prompt = load_prompt("prompts/pdf-rag.yaml", encoding="utf8")
+    prompt = load_prompt("langchain_shwang/19-Streamlit/prompts/pdf-rag.yaml", encoding="utf8")
 
     llm = ChatOpenAI(model_name=model_name, temperature=0)
 

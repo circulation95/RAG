@@ -23,6 +23,14 @@ from langgraph.prebuilt import tools_condition
 from langchain_teddynote.models import get_model_name, LLMs
 from langchain_core.tools.retriever import create_retriever_tool
 
+from langgraph.graph import END, StateGraph, START
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_teddynote.graphs import visualize_graph
+
+from langchain_core.runnables import RunnableConfig
+from langchain_teddynote.messages import stream_graph, invoke_graph, random_uuid
+
 load_dotenv()
 logging.langsmith("Agent RAG")
 
@@ -31,6 +39,9 @@ st.title("Agentic RAG")
 # 세션 상태 초기화
 if "messages" not in st.session_state:
     st.session_state["messages"] = []  # 대화 내용을 저장할 리스트 초기화
+
+if "graph" not in st.session_state:
+    st.session_state["graph"] = None
 
 
 # 상수 정의
@@ -204,25 +215,35 @@ def generate(state):
 def print_messages():
     """
     저장된 메시지를 화면에 출력하는 함수입니다.
+    (데이터 형식이 맞지 않아도 에러가 나지 않도록 예외 처리 추가)
     """
     for role, content_list in st.session_state["messages"]:
         with st.chat_message(role):
             for content in content_list:
                 if isinstance(content, list):
-                    message_type, message_content = content
+                    # [방어 코드] 리스트 길이가 2개인지 확인
+                    if len(content) == 2:
+                        message_type, message_content = content
+                    elif len(content) == 1:
+                        # 데이터가 1개만 있으면 텍스트로 간주하고 처리
+                        message_type = MessageType.TEXT
+                        message_content = content[0]
+                    else:
+                        # 알 수 없는 형식이면 건너뜀
+                        continue
+
+                    # 타입에 따라 다르게 렌더링
                     if message_type == MessageType.TEXT:
-                        st.markdown(message_content)  # 텍스트 메시지 출력
+                        st.markdown(message_content)
                     elif message_type == MessageType.FIGURE:
-                        st.pyplot(message_content)  # 그림 메시지 출력
+                        st.pyplot(message_content)
                     elif message_type == MessageType.CODE:
-                        with st.status("코드 출력", expanded=False):
-                            st.code(
-                                message_content, language="python"
-                            )  # 코드 메시지 출력
+                        st.code(message_content, language="python")
                     elif message_type == MessageType.DATAFRAME:
-                        st.dataframe(message_content)  # 데이터프레임 메시지 출력
-                else:
-                    raise ValueError(f"알 수 없는 콘텐츠 유형: {content}")
+                        st.dataframe(message_content)
+                elif isinstance(content, str):
+                    # 리스트가 아니라 문자열이 바로 들어있는 경우 처리
+                    st.markdown(content)
 
 
 def add_message(role: MessageRole, content: List[Union[MessageType, str]]):
@@ -240,41 +261,63 @@ def add_message(role: MessageRole, content: List[Union[MessageType, str]]):
         messages.append([role, [content]])  # 새로운 역할의 메시지는 새로 추가합니다
 
 
-# 사이드바 설정
+# --- 사이드바 설정 ---
 with st.sidebar:
-    clear_btn = st.button("대화 초기화")  # 대화 내용을 초기화하는 버튼
-    uploaded_file = st.file_uploader(
-        "CSV 파일을 업로드 해주세요.", type=["csv"], accept_multiple_files=True
-    )  # CSV 파일 업로드 기능
+    clear_btn = st.button("대화 초기화")
+    # PDF 로직이므로 type을 pdf로 변경
+    uploaded_file = st.file_uploader("PDF 파일을 업로드 해주세요.", type=["pdf"])
+    # 모델명 수정 (실제 존재하는 모델명으로)
     selected_model = st.selectbox(
-        "OpenAI 모델을 선택해주세요.", ["gpt-4.1-mini", "gpt-4.1-nano"], index=0
-    )  # OpenAI 모델 선택 옵션
-    apply_btn = st.button("데이터 분석 시작")  # 데이터 분석을 시작하는 버튼
+        "OpenAI 모델을 선택해주세요.",
+        ["gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+        index=0,
+    )
+    apply_btn = st.button("설정 적용 및 그래프 생성")
 
 
 # 질문 처리 함수
 def ask(query):
-    """
-    사용자의 질문을 처리하고 응답을 생성하는 함수입니다.
+    # 그래프가 없으면 실행 불가
+    if st.session_state["graph"] is None:
+        st.error("먼저 파일을 업로드하고 '설정 적용' 버튼을 눌러주세요.")
+        return
 
-    Args:
-        query (str): 사용자의 질문
-    """
-    if "agent" in st.session_state:
-        st.chat_message("user").write(query)
-        add_message(MessageRole.USER, [MessageType.TEXT, query])
+    # 1. 사용자 질문을 UI와 세션에 기록
+    add_message(MessageRole.USER, [MessageType.TEXT, query])
+    with st.chat_message("user"):
+        st.write(query)
 
-        agent = st.session_state["agent"]
-        response = agent.stream({"input": query})
+    # 설정 (thread_id 등)
+    config = RunnableConfig(
+        recursion_limit=10, configurable={"thread_id": random_uuid()}
+    )
 
-        with st.chat_message("assistant"):
-            container = st.empty()
-            ai_answer = ""
-            for token in response:
-                ai_answer += token
-            st.write(ai_answer)
+    # 세션에 저장된 그래프 불러오기
+    graph = st.session_state["graph"]
 
-        add_message(MessageRole.ASSISTANT, [MessageType.TEXT, ai_answer])
+    with st.chat_message("assistant"):
+        # 2. 그래프 실행 및 UI 스트리밍 출력
+        # stream_graph는 화면에 글자를 찍어주는 역할만 합니다.
+        stream_graph(
+            graph,
+            {"messages": [("user", query)]},
+            config,
+            ["agent", "rewrite", "generate"],
+        )
+
+        # 3. [핵심] 그래프의 현재 상태(State)를 조회하여 '진짜 답변' 가져오기
+        # 그래프 실행이 끝난 후, 메모리에 저장된 마지막 메시지를 가져옵니다.
+        snapshot = graph.get_state(config)
+
+        if snapshot.values and "messages" in snapshot.values:
+            # 대화 기록 중 가장 마지막 메시지(AI의 답변) 추출
+            last_message = snapshot.values["messages"][-1]
+            ai_answer = last_message.content
+        else:
+            ai_answer = "답변을 가져오는 데 실패했습니다."
+
+    # 4. 실제 AI 답변을 세션 스테이트(대화 기록)에 저장
+    add_message(MessageRole.ASSISTANT, [MessageType.TEXT, ai_answer])
 
 
 # 메인 로직
@@ -297,6 +340,48 @@ if uploaded_file:
     )
     tools = [retriever_tool]
     st.session_state["tool"] = tools
+    retrieve = ToolNode([retriever_tool])
+    st.success("설정이 완료되었습니다. 대화를 시작해 주세요!")
+
+    # AgentState 기반 상태 그래프 워크플로우 초기화
+    workflow = StateGraph(AgentState)
+
+    # 노드 정의
+    workflow.add_node("agent", agent)  # 에이전트 노드
+    retrieve = ToolNode([retriever_tool])
+    workflow.add_node("retrieve", retrieve)  # 검색 노드
+    workflow.add_node("rewrite", rewrite)  # 질문 재작성 노드
+    workflow.add_node("generate", generate)  # 관련 문서 확인 후 응답 생성 노드
+
+    # 엣지 연결
+    workflow.add_edge(START, "agent")
+
+    # 검색 여부 결정을 위한 조건부 엣지 추가
+    workflow.add_conditional_edges(
+        "agent",
+        # 에이전트 결정 평가
+        tools_condition,
+        {
+            # 조건 출력을 그래프 노드에 매핑
+            "tools": "retrieve",
+            END: END,
+        },
+    )
+
+    # 액션 노드 실행 후 처리될 엣지 정의
+    workflow.add_conditional_edges(
+        "retrieve",
+        # 문서 품질 평가
+        grade_documents,
+    )
+    workflow.add_edge("generate", END)
+    workflow.add_edge("rewrite", "agent")
+
+    # 그래프 컴파일
+    st.session_state["graph"] = workflow.compile(checkpointer=MemorySaver())
+    st.success("시스템 준비 완료! 질문을 입력하세요.")
+elif apply_btn:
+    st.warning("파일을 업로드 해주세요.")
 
 print_messages()  # 저장된 메시지 출력
 

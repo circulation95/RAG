@@ -1,10 +1,10 @@
-from rag.base import RetrievalChain
+from rag.base import RetrevalChain
 from langchain_community.document_loaders import PDFPlumberLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import List, Annotated
 
 
-class PDFRetrievalChain(RetrievalChain):
+class PDFRetrievalChain(RetrevalChain):
     def __init__(self, source_uri: Annotated[str, "Source URI"]):
         self.source_uri = source_uri
         self.k = 6

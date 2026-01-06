@@ -8,9 +8,6 @@ import os
 
 load_dotenv()
 
-logging.langsmith("[Project] PDF RAG With Evaluation")
-
-
 # 캐시 디렉토리 생성
 if not os.path.exists(".cache"):
     os.mkdir(".cache")

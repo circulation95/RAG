@@ -26,7 +26,7 @@ from langchain_core.tools.retriever import create_retriever_tool
 from langgraph.graph import END, StateGraph, START
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_teddynote.graphs import visualize_graph
+from langchain_teddynote.graphs import visualize_graph_streamlit
 
 from langchain_core.runnables import RunnableConfig
 from langchain_teddynote.messages import stream_graph, invoke_graph, random_uuid
@@ -149,7 +149,7 @@ def agent(state):
     model = ChatOpenAI(temperature=0, streaming=True, model=selected_model)
 
     # retriever tool 바인딩
-    model = model.bind_tools(tools)
+    model = model.bind_tools([retriever_tool])
 
     # 에이전트 응답 생성
     response = model.invoke(messages)
@@ -277,114 +277,89 @@ with st.sidebar:
 
 # 질문 처리 함수
 def ask(query):
-    # 그래프가 없으면 실행 불가
     if st.session_state["graph"] is None:
         st.error("먼저 파일을 업로드하고 '설정 적용' 버튼을 눌러주세요.")
         return
 
-    # 1. 사용자 질문을 UI와 세션에 기록
     add_message(MessageRole.USER, [MessageType.TEXT, query])
     with st.chat_message("user"):
         st.write(query)
 
-    # 설정 (thread_id 등)
-    config = RunnableConfig(
-        recursion_limit=10, configurable={"thread_id": random_uuid()}
-    )
-
-    # 세션에 저장된 그래프 불러오기
     graph = st.session_state["graph"]
 
+    # thread_id는 대화 동안 고정 권장
+    if "thread_id" not in st.session_state:
+        st.session_state["thread_id"] = random_uuid()
+
+    config = RunnableConfig(
+        recursion_limit=10,
+        configurable={"thread_id": st.session_state["thread_id"]},
+    )
+
     with st.chat_message("assistant"):
-        # 2. 그래프 실행 및 UI 스트리밍 출력
-        # stream_graph는 화면에 글자를 찍어주는 역할만 합니다.
-        stream_graph(
-            graph,
-            {"messages": [("user", query)]},
-            config,
-            ["agent", "rewrite", "generate"],
+        result_state = graph.invoke(
+            {"messages": [HumanMessage(content=query)]},
+            config=config,
         )
 
-        # 3. [핵심] 그래프의 현재 상태(State)를 조회하여 '진짜 답변' 가져오기
-        # 그래프 실행이 끝난 후, 메모리에 저장된 마지막 메시지를 가져옵니다.
-        snapshot = graph.get_state(config)
+        ai_answer = result_state["messages"][-1].content
+        st.markdown(ai_answer)
 
-        if snapshot.values and "messages" in snapshot.values:
-            # 대화 기록 중 가장 마지막 메시지(AI의 답변) 추출
-            last_message = snapshot.values["messages"][-1]
-            ai_answer = last_message.content
-        else:
-            ai_answer = "답변을 가져오는 데 실패했습니다."
-
-    # 4. 실제 AI 답변을 세션 스테이트(대화 기록)에 저장
     add_message(MessageRole.ASSISTANT, [MessageType.TEXT, ai_answer])
+
+
+def build_retriever_tool_from_pdf(uploaded_file):
+    pdf = embed_file(uploaded_file)
+    retriever = pdf.retriever
+
+    retriever_tool = create_retriever_tool(
+        retriever,
+        "pdf_retriever",
+        "Search and return information about the uploaded PDF.",
+        document_prompt=PromptTemplate.from_template(
+            "<document><context>{page_content}</context>"
+            "<metadata><source>{source}</source><page>{page}</page></metadata></document>"
+        ),
+    )
+    return retriever_tool
+
+
+def build_graph(retriever_tool):
+    workflow = StateGraph(AgentState)
+
+    workflow.add_node("agent", agent)
+    workflow.add_node("retrieve", ToolNode([retriever_tool]))
+    workflow.add_node("rewrite", rewrite)
+    workflow.add_node("generate", generate)
+
+    workflow.add_edge(START, "agent")
+
+    workflow.add_conditional_edges(
+        "agent",
+        tools_condition,
+        {"tools": "retrieve", END: END},
+    )
+
+    workflow.add_conditional_edges("retrieve", grade_documents)
+    workflow.add_edge("generate", END)
+    workflow.add_edge("rewrite", "agent")
+
+    return workflow.compile(checkpointer=MemorySaver())
 
 
 # 메인 로직
 if clear_btn:
     st.session_state["messages"] = []  # 대화 내용 초기화
 
-if uploaded_file:
-    pdf = embed_file(uploaded_file)
-    pdf_chain = pdf.chain
-    pdf_retriever = pdf.retriever
-    st.session_state["chain"] = pdf_chain
-
-    retriever_tool = create_retriever_tool(
-        pdf_retriever,
-        "pdf_retriever",
-        "Search and return information about SPRI AI Brief PDF file. It contains useful information on recent AI trends. The document is published on Dec 2023.",
-        document_prompt=PromptTemplate.from_template(
-            "<document><context>{page_content}</context><metadata><source>{source}</source><page>{page}</page></metadata></document>"
-        ),
-    )
-    tools = [retriever_tool]
-    st.session_state["tool"] = tools
-    retrieve = ToolNode([retriever_tool])
-    st.success("설정이 완료되었습니다. 대화를 시작해 주세요!")
-
-    # AgentState 기반 상태 그래프 워크플로우 초기화
-    workflow = StateGraph(AgentState)
-
-    # 노드 정의
-    workflow.add_node("agent", agent)  # 에이전트 노드
-    retrieve = ToolNode([retriever_tool])
-    workflow.add_node("retrieve", retrieve)  # 검색 노드
-    workflow.add_node("rewrite", rewrite)  # 질문 재작성 노드
-    workflow.add_node("generate", generate)  # 관련 문서 확인 후 응답 생성 노드
-
-    # 엣지 연결
-    workflow.add_edge(START, "agent")
-
-    # 검색 여부 결정을 위한 조건부 엣지 추가
-    workflow.add_conditional_edges(
-        "agent",
-        # 에이전트 결정 평가
-        tools_condition,
-        {
-            # 조건 출력을 그래프 노드에 매핑
-            "tools": "retrieve",
-            END: END,
-        },
-    )
-
-    # 액션 노드 실행 후 처리될 엣지 정의
-    workflow.add_conditional_edges(
-        "retrieve",
-        # 문서 품질 평가
-        grade_documents,
-    )
-    workflow.add_edge("generate", END)
-    workflow.add_edge("rewrite", "agent")
-
-    # 그래프 컴파일
-    st.session_state["graph"] = workflow.compile(checkpointer=MemorySaver())
+if uploaded_file and apply_btn:
+    retriever_tool = build_retriever_tool_from_pdf(uploaded_file)
+    st.session_state["tool"] = [retriever_tool]
+    st.session_state["graph"] = build_graph(retriever_tool)
     st.success("시스템 준비 완료! 질문을 입력하세요.")
-elif apply_btn:
+elif apply_btn and not uploaded_file:
     st.warning("파일을 업로드 해주세요.")
 
 print_messages()  # 저장된 메시지 출력
-
 user_input = st.chat_input("궁금한 내용을 물어보세요!")  # 사용자 입력 받기
 if user_input:
     ask(user_input)  # 사용자 질문 처리

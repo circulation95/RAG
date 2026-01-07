@@ -26,7 +26,7 @@ from langchain_core.tools.retriever import create_retriever_tool
 from langgraph.graph import END, StateGraph, START
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_teddynote.graphs import visualize_graph_streamlit
+from langchain_teddynote.graphs import visualize_graph
 
 from langchain_core.runnables import RunnableConfig
 from langchain_teddynote.messages import stream_graph, invoke_graph, random_uuid

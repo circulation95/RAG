@@ -27,7 +27,7 @@ from langchain_core.tools.retriever import create_retriever_tool
 from langgraph.graph import END, StateGraph, START
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_teddynote.graphs import visualize_graph_streamlit
+from langchain_teddynote.graphs import visualize_graph
 
 from langchain_core.runnables import RunnableConfig
 from langchain_teddynote.messages import stream_graph, invoke_graph, random_uuid
@@ -259,10 +259,17 @@ def route_question(state):
     llm = ChatOpenAI(model=selected_model, temperature=0)
     structured_llm_router = llm.with_structured_output(RouteQuery)
 
+    question = state["question"]
+
     # 시스템 메시지와 사용자 질문을 포함한 프롬프트 템플릿 생성
     system = """You are an expert at routing a user question to a vectorstore or web search.
-    The vectorstore contains documents related to DEC 2023 AI Brief Report(SPRI) with Samsung Gause, Anthropic, etc.
-    Use the vectorstore for questions on these topics. Otherwise, use web-search."""
+        
+        The vectorstore contains documents provided by the user (specifically about AI trends, SPRI reports, Samsung Gause, Anthropic, etc).
+        
+        CRITICAL INSTRUCTION:
+        1. If the user asks about "this document", "summary", or specific AI details, ALWAYS choose 'vectorstore'.
+        2. Only choose 'web_search' if the question is clearly about unrelated topics (e.g., weather, celebrities) or recent news NOT covered in 2023.
+        3. If you are unsure, default to 'vectorstore'."""
 
     # Routing 을 위한 프롬프트 템플릿 생성
     route_prompt = ChatPromptTemplate.from_messages(
@@ -271,20 +278,21 @@ def route_question(state):
             ("human", "{question}"),
         ]
     )
-    # 프롬프트 템플릿과 구조화된 LLM 라우터를 결합하여 질문 라우터 생성
+    
     question_router = route_prompt | structured_llm_router
 
     print("==== [ROUTE QUESTION] ====")
-    # 질문 가져오기
-    question = state["question"]
+
     # 질문 라우팅
     source = question_router.invoke({"question": question})
+    
+    # [디버깅용 출력 추가] 실제로 LLM이 뭐라고 생각했는지 확인
+    print(f"==== [ROUTER DECISION] Query: {question} -> Source: {source.datasource} ====") 
+
     # 질문 라우팅 결과에 따른 노드 라우팅
     if source.datasource == "web_search":
-        print("==== [ROUTE QUESTION TO WEB SEARCH] ====")
         return "web_search"
     elif source.datasource == "vectorstore":
-        print("==== [ROUTE QUESTION TO VECTORSTORE] ====")
         return "vectorstore"
 
 # 문서 관련성 평가 노드
@@ -467,13 +475,13 @@ def ask(query):
     )
 
     with st.chat_message("assistant"):
-        result_state = graph.invoke(
-            {"messages": [HumanMessage(content=query)]},
-            config=config,
-        )
+            result_state = graph.invoke(
+                {"question": query}, 
+                config=config
+            )
 
-        ai_answer = result_state["messages"][-1].content
-        st.markdown(ai_answer)
+            ai_answer = result_state["generation"]
+            st.markdown(ai_answer)
 
     add_message(MessageRole.ASSISTANT, [MessageType.TEXT, ai_answer])
 
@@ -528,7 +536,7 @@ if clear_btn:
     st.session_state["messages"] = []  # 대화 내용 초기화
 
 if uploaded_file and apply_btn:
-    pdf = PDFRetrievalChain([uploaded_file]).create_chain()
+    pdf = embed_file(uploaded_file)
     pdf_retriever = pdf.retriever
     pdf_chain = pdf.chain
 

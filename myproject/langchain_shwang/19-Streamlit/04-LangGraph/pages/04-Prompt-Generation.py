@@ -68,8 +68,6 @@ class MessageType:
 
 # State 정의
 class State(TypedDict):
-    name: str
-    instructions: str
     messages: Annotated[list, add_messages]
 
 
@@ -315,16 +313,6 @@ def add_message(role: MessageRole, content: List[Union[MessageType, str]]):
 
 # --- 사이드바 설정 ---
 with st.sidebar:
-    st.header("시뮬레이션 설정")  # 헤더 추가
-
-    # [수정] 이름과 지시사항 입력 필드 추가
-    sim_name = st.text_input("시뮬레이션 사용자 이름", placeholder="예: 김철수")
-    sim_instructions = st.text_area(
-        "상황 및 지시사항",
-        placeholder="예: 항공권 날짜를 다음주로 변경하고 싶음. 환불 수수료에 대해 불만이 있음.",
-    )
-
-    st.divider()  # 구분선
 
     selected_model = st.selectbox(
         "OpenAI 모델을 선택해주세요.",
@@ -334,12 +322,10 @@ with st.sidebar:
 
     clear_btn = st.button("대화 초기화")
 
-    execute_btn = st.button("시뮬레이션 실행")
-
 
 # 질문 처리 함수 (수정됨: name, instructions 전달)
 # 질문 처리 함수 (수정됨: stream 사용)
-def ask(query, name, instructions):
+def ask(query):
     # 1. 초기 트리거 메시지(사용자 입력) 저장 및 출력
     add_message(MessageRole.USER, [MessageType.TEXT, query])
     with st.chat_message("user"):
@@ -358,48 +344,67 @@ def ask(query, name, instructions):
     # 2. Graph 스트리밍 실행
     # graph.stream을 쓰면 노드 하나가 끝날 때마다 event를 반환합니다.
     events = graph.stream(
-        {
-            "messages": [HumanMessage(content=query)],
-            "name": name,
-            "instructions": instructions,
-        },
+        {"messages": [HumanMessage(content=query)]},
         config=config,
     )
 
     # 3. 이벤트 루프: 각 노드(AI, 시뮬레이션 유저)의 출력을 실시간으로 처리
     for event in events:
         for node_name, values in event.items():
-            # values["messages"]에는 해당 노드가 반환한 메시지 리스트가 들어있습니다.
-            # 예: [('assistant', '안녕하세요...')] 또는 [('user', '환불해주세요...')]
-            if "messages" in values:
-                last_message = values["messages"][-1]
+            if "messages" not in values or not values["messages"]:
+                continue
 
-                # 튜플 형태로 저장된 경우 (role, content) 분리
-                if isinstance(last_message, tuple):
-                    role, content = last_message
-                else:
-                    # LangChain Message 객체인 경우 (BaseMessage)
-                    role = (
-                        "user"
-                        if isinstance(last_message, HumanMessage)
-                        else "assistant"
-                    )
-                    content = last_message.content
+            last_message = values["messages"][-1]
 
-                # 4. 역할에 맞게 화면에 즉시 출력
-                # role이 'user'면 시뮬레이션 고객, 'assistant'면 상담원
+            # 1) tuple 형태 (role, content)인 경우
+            if isinstance(last_message, tuple):
+                role, content = last_message
                 st_role = "user" if role == "user" else "assistant"
 
-                with st.chat_message(st_role):
-                    st.markdown(content)
+            else:
+                # 2) LangChain 메시지 객체인 경우
+                if isinstance(last_message, HumanMessage):
+                    st_role = "user"
+                    content = last_message.content
 
-                # 5. 세션 스테이트에 저장 (새로고침 시 유지용)
-                add_message(st_role, [MessageType.TEXT, content])
+                elif isinstance(last_message, ToolMessage):
+                    st_role = "tool"
+                    content = last_message.content
+
+                elif isinstance(last_message, AIMessage):
+                    st_role = "assistant"
+                    content = last_message.content or ""
+
+                    # tool_calls만 있고 content가 비는 케이스 보정(선택)
+                    if not content.strip() and getattr(
+                        last_message, "tool_calls", None
+                    ):
+                        content = "요구사항을 정리했습니다. 다음 단계로 진행할게요."
+
+                    # 진짜로 아무것도 없으면 출력 스킵
+                    if not content.strip():
+                        continue
+
+                else:
+                    # 기타 메시지 타입 fallback
+                    st_role = "assistant"
+                    content = getattr(last_message, "content", "") or ""
+                    if not content.strip():
+                        continue
+
+            # 3) 출력
+            with st.chat_message(st_role):
+                st.markdown(content)
+
+            # 4) 저장
+            add_message(st_role, [MessageType.TEXT, content])
 
 
 # 메인 로직
 if clear_btn:
     st.session_state["messages"] = []
+    st.session_state["graph"] = build_graph()  # 새 checkpointer
+    st.session_state.pop("thread_id", None)  # 새 thread로 시작
 
 if st.session_state["graph"] is None:
     st.session_state["graph"] = build_graph()
@@ -408,24 +413,5 @@ print_messages()
 # 사용자 입력 처리 (채팅바)
 user_input = st.chat_input("시뮬레이션을 시작하려면 메시지를 입력하세요!")
 
-# [추가] 1. '시뮬레이션 실행' 버튼 클릭 시 처리 로직
-if execute_btn:
-    # 이름과 지시사항이 입력되었는지 확인
-    if not sim_name.strip() or not sim_instructions.strip():
-        st.warning(
-            "⚠️ 사이드바에서 '시뮬레이션 사용자 이름'과 '상황 및 지시사항'을 모두 입력해주세요!"
-        )
-    else:
-        # 강제로 "안녕하세요" 메시지를 보내 시뮬레이션 시작
-        ask("안녕하세요", sim_name, sim_instructions)
-        # 실행 후 UI 갱신을 위해 rerun (선택사항, ask 함수가 화면에 그리므로 없어도 동작함)
-        st.rerun()
-
-# [기존] 2. 사용자가 직접 채팅창에 입력했을 때 처리 로직
 if user_input:
-    if not sim_name.strip() or not sim_instructions.strip():
-        st.warning(
-            "⚠️ 사이드바에서 '시뮬레이션 사용자 이름'과 '상황 및 지시사항'을 모두 입력해주세요!"
-        )
-    else:
-        ask(user_input, sim_name, sim_instructions)
+    ask(user_input)

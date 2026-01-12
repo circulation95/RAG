@@ -12,7 +12,13 @@ import matplotlib.pyplot as plt
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from typing import Annotated, Sequence, TypedDict
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage
+from langchain_core.messages import (
+    BaseMessage,
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.graph.message import add_messages
 from typing import Literal
 from langchain import hub
@@ -45,11 +51,13 @@ if "messages" not in st.session_state:
 if "graph" not in st.session_state:
     st.session_state["graph"] = None
 
+
 # 상수 정의
 class MessageRole:
     USER = "user"
     TOOL = "tool"
     ASSISTANT = "assistant"
+
 
 class MessageType:
     TEXT = "text"
@@ -57,11 +65,27 @@ class MessageType:
     CODE = "code"
     DATAFRAME = "dataframe"
 
+
 # State 정의
 class State(TypedDict):
     name: str
     instructions: str
     messages: Annotated[list, add_messages]
+
+
+# LLM에 대한 프롬프트 지침을 정의하는 데이터 모델
+class PromptInstructions(BaseModel):
+    """Instructions on how to prompt the LLM."""
+
+    # 프롬프트의 목표
+    objective: str
+    # 프롬프트 템플릿에 전달될 변수 목록
+    variables: List[str]
+    # 출력에서 피해야 할 제약 조건 목록
+    constraints: List[str]
+    # 출력이 반드시 따라야 할 요구 사항 목록
+    requirements: List[str]
+
 
 # 함수 정의 (기존 유지)
 def format_docs(docs):
@@ -72,6 +96,7 @@ def format_docs(docs):
         ]
     )
 
+
 def embed_file(file):
     file_content = file.read()
     file_path = f".cache/files/{file.name}"
@@ -81,102 +106,180 @@ def embed_file(file):
     pdf = PDFRetrievalChain([file_path]).create_chain()
     return pdf
 
-def call_chatbot(messages: List[BaseMessage]) -> dict:
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "You are a professional customer support agent. "
-                "You can handle a wide range of user inquiries across different domains. "
-                "Your goal is to clearly understand the user's intent, ask clarifying questions if needed, "
-                "and provide accurate, polite, and helpful responses. "
-                "Always respond in Korean."
-            ),
-            MessagesPlaceholder(variable_name="messages"),
-        ]
-    )
-    model = ChatOpenAI(model=selected_model, temperature=0.6)
-    chain = prompt | model | StrOutputParser()
-    return chain.invoke({"messages": messages})
 
-def create_scenario(name: str, instructions: str):
-    system_prompt_template = """You are a customer of an airline company. \
-You are interacting with a user who is a customer support person. \
+# 사용자 메시지 목록을 받아 시스템 메시지와 결합하여 반환
+def get_messages_info(messages):
+    # 사용자 요구사항 수집을 위한 시스템 메시지 템플릿
+    template = """Your job is to get information from a user about what type of prompt template they want to create.
 
-Your name is {name}.
+    You should get the following information from them:
 
-# Instructions:
-{instructions}
+    - What the objective of the prompt is
+    - What variables will be passed into the prompt template
+    - Any constraints for what the output should NOT do
+    - Any requirements that the output MUST adhere to
 
-[IMPORTANT] 
-- When you are finished with the conversation, respond with a single word 'FINISHED'
-- You must speak in Korean."""
+    If you are not able to discern this info, ask them to clarify! Do not attempt to wildly guess.
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt_template),
-            MessagesPlaceholder(variable_name="messages"),
-        ]
-    )
-    prompt = prompt.partial(name=name, instructions=instructions)
-    return prompt
+    After you are able to discern all the information, call the relevant tool.
 
-def _swap_roles(messages):
-    print("==== [SWAP ROLES] ====")
-    new_messages = []
+    [IMPORTANT] Your conversation should be in Korean. Your generated prompt should be in English."""
+    # 사용자 요구사항 수집을 위한 시스템 메시지와 기존 메시지 결합
+    return [SystemMessage(content=template)] + messages
+
+
+# 상태 정보를 기반으로 메시지 체인을 생성하고 LLM 호출
+def info_chain(state):
+    llm = ChatOpenAI(temperature=0, model=selected_model)
+    # PromptInstructions 구조체를 바인딩
+    llm_with_tool = llm.bind_tools([PromptInstructions])
+    # 상태에서 메시지 정보를 가져와 시스템 메시지와 결합
+    messages = get_messages_info(state["messages"])
+    # LLM을 호출하여 응답 생성
+    response = llm_with_tool.invoke(messages)
+    # 생성된 응답을 메시지 목록으로 반환
+    return {"messages": [response]}
+
+
+# 프롬프트 생성을 위한 메시지 가져오기 함수
+# 도구 호출 이후의 메시지만 가져옴
+def get_prompt_messages(messages: list):
+
+    # 프롬프트를 생성하는 메타 프롬프트 정의(OpenAI 메타 프롬프트 엔지니어링 가이드 참고)
+    META_PROMPT = """Given a task description or existing prompt, produce a detailed system prompt to guide a language model in completing the task effectively.
+
+    # Guidelines
+
+    - Understand the Task: Grasp the main objective, goals, requirements, constraints, and expected output.
+    - Minimal Changes: If an existing prompt is provided, improve it only if it's simple. For complex prompts, enhance clarity and add missing elements without altering the original structure.
+    - Reasoning Before Conclusions**: Encourage reasoning steps before any conclusions are reached. ATTENTION! If the user provides examples where the reasoning happens afterward, REVERSE the order! NEVER START EXAMPLES WITH CONCLUSIONS!
+        - Reasoning Order: Call out reasoning portions of the prompt and conclusion parts (specific fields by name). For each, determine the ORDER in which this is done, and whether it needs to be reversed.
+        - Conclusion, classifications, or results should ALWAYS appear last.
+    - Examples: Include high-quality examples if helpful, using placeholders [in brackets] for complex elements.
+    - What kinds of examples may need to be included, how many, and whether they are complex enough to benefit from placeholders.
+    - Clarity and Conciseness: Use clear, specific language. Avoid unnecessary instructions or bland statements.
+    - Formatting: Use markdown features for readability. DO NOT USE ``` CODE BLOCKS UNLESS SPECIFICALLY REQUESTED.
+    - Preserve User Content: If the input task or prompt includes extensive guidelines or examples, preserve them entirely, or as closely as possible. If they are vague, consider breaking down into sub-steps. Keep any details, guidelines, examples, variables, or placeholders provided by the user.
+    - Constants: DO include constants in the prompt, as they are not susceptible to prompt injection. Such as guides, rubrics, and examples.
+    - Output Format: Explicitly the most appropriate output format, in detail. This should include length and syntax (e.g. short sentence, paragraph, JSON, etc.)
+        - For tasks outputting well-defined or structured data (classification, JSON, etc.) bias toward outputting a JSON.
+        - JSON should never be wrapped in code blocks (```) unless explicitly requested.
+
+    The final prompt you output should adhere to the following structure below. Do not include any additional commentary, only output the completed system prompt. SPECIFICALLY, do not include any additional messages at the start or end of the prompt. (e.g. no "---")
+
+    [Concise instruction describing the task - this should be the first line in the prompt, no section header]
+
+    [Additional details as needed.]
+
+    [Optional sections with headings or bullet points for detailed steps.]
+
+    # Steps [optional]
+
+    [optional: a detailed breakdown of the steps necessary to accomplish the task]
+
+    # Output Format
+
+    [Specifically call out how the output should be formatted, be it response length, structure e.g. JSON, markdown, etc]
+
+    [User given variables should be wrapped in {{brackets}}]
+
+    <Question>
+    {{question}}
+    </Question>
+
+    <Answer>
+    {{answer}}
+    </Answer>
+
+    # Examples [optional]
+
+    [Optional: 1-3 well-defined examples with placeholders if necessary. Clearly mark where examples start and end, and what the input and output are. User placeholders as necessary.]
+    [If the examples are shorter than what a realistic example is expected to be, make a reference with () explaining how real examples should be longer / shorter / different. AND USE PLACEHOLDERS! ]
+
+    # Notes [optional]
+
+    [optional: edge cases, details, and an area to call or repeat out specific important considerations]
+
+    # Based on the following requirements, write a good prompt template:
+
+    {reqs}
+    """
+    # 도구 호출 정보를 저장할 변수 초기화
+    tool_call = None
+    # 도구 호출 이후의 메시지를 저장할 리스트 초기화
+    other_msgs = []
+    # 메시지 목록을 순회하며 도구 호출 및 기타 메시지 처리
     for m in messages:
-        if isinstance(m, AIMessage):
-            new_messages.append(HumanMessage(content=m.content))
-        else:
-            new_messages.append(AIMessage(content=m.content))
-    return new_messages
+        # AI 메시지 중 도구 호출이 있는 경우 도구 호출 정보 저장
+        if isinstance(m, AIMessage) and m.tool_calls:
+            tool_call = m.tool_calls[0]["args"]
+        # ToolMessage는 건너뜀
+        elif isinstance(m, ToolMessage):
+            continue
+        # 도구 호출 이후의 메시지를 리스트에 추가
+        elif tool_call is not None:
+            other_msgs.append(m)
+    # 시스템 메시지와 도구 호출 이후의 메시지를 결합하여 반환
+    return [SystemMessage(content=META_PROMPT.format(reqs=tool_call))] + other_msgs
 
-def ai_assistant_node(state: State):
-    print("==== [AI ASSISTANT] ====")
-    ai_response = call_chatbot(state["messages"])
-    return {"messages": [("assistant", ai_response)]}
 
-def simulated_user_node(state: State):
-    print("==== [SIMULATED USER] ====")
-    name = state["name"]
-    instructions = state["instructions"]
-    llm = ChatOpenAI(model=selected_model, temperature=0.6)
-    simulated_user = create_scenario(name, instructions) | llm | StrOutputParser()
-    new_messages = _swap_roles(state["messages"])
-    response = simulated_user.invoke({"messages": new_messages})
-    return {"messages": [("user", response)]}
+# 프롬프트 생성 체인 함수 정의
+def prompt_gen_chain(state):
+    llm = ChatOpenAI(temperature=0, model=selected_model)
+    # 상태에서 프롬프트 메시지를 가져옴
+    messages = get_prompt_messages(state["messages"])
+    # LLM을 호출하여 응답 생성
+    response = llm.invoke(messages)
+    # 생성된 응답을 메시지 목록으로 반환
+    return {"messages": [response]}
 
-def should_continue(state: State):
-    print("==== [SHOULD CONTINUE] ====")
-    if len(state["messages"]) > 6:
-        return "end"
-    elif state["messages"][-1].content == "FINISHED":
-        print("==== [FINISH] ====")
-        return "end"
-    else:  
-        print("==== [CONTINUE] ====")
-        return "continue"
+
+# 상태 결정 함수 정의
+# 상태에서 메시지 목록을 가져옴
+def get_state(state):
+    messages = state["messages"]
+    # 마지막 메시지가 AIMessage이고 도구 호출이 있는 경우
+    if isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
+        # 도구 메시지를 추가해야 하는 상태 반환
+        return "add_tool_message"
+    # 마지막 메시지가 HumanMessage가 아닌 경우
+    elif not isinstance(messages[-1], HumanMessage):
+        # 대화 종료 상태 반환
+        return END
+    # 기본적으로 정보 수집 상태 반환
+    return "info"
+
 
 def build_graph():
     workflow = StateGraph(State)
-    workflow.add_node("simulated_user", simulated_user_node)
-    workflow.add_node("ai_assistant", ai_assistant_node)
+    workflow.add_node("info", info_chain)
+    workflow.add_node("prompt", prompt_gen_chain)
 
-    workflow.add_edge("ai_assistant", "simulated_user")
+    # 도구 메시지 추가 상태 노드 정의
+    @workflow.add_node
+    def add_tool_message(state: State):
+        return {
+            "messages": [
+                ToolMessage(
+                    content="Prompt generated!",
+                    tool_call_id=state["messages"][-1].tool_calls[0][
+                        "id"
+                    ],  # 상태에서 도구 호출 ID를 가져와 메시지에 추가
+                )
+            ]
+        }
 
-    workflow.add_conditional_edges(
-        "simulated_user",
-        should_continue,
-        {
-            "end": END,
-            "continue": "ai_assistant",
-        },
-    )
+    # 조건부 상태 전환 정의
+    workflow.add_conditional_edges("info", get_state, ["add_tool_message", "info", END])
 
-    workflow.set_entry_point("ai_assistant")
+    # 엣지 정의
+    workflow.add_edge("add_tool_message", "prompt")
+    workflow.add_edge("prompt", END)
+    workflow.add_edge(START, "info")
 
     return workflow.compile(checkpointer=MemorySaver())
-    
+
+
 def print_messages():
     for role, content_list in st.session_state["messages"]:
         with st.chat_message(role):
@@ -201,6 +304,7 @@ def print_messages():
                 elif isinstance(content, str):
                     st.markdown(content)
 
+
 def add_message(role: MessageRole, content: List[Union[MessageType, str]]):
     messages = st.session_state["messages"]
     if messages and messages[-1][0] == role:
@@ -211,22 +315,25 @@ def add_message(role: MessageRole, content: List[Union[MessageType, str]]):
 
 # --- 사이드바 설정 ---
 with st.sidebar:
-    st.header("시뮬레이션 설정") # 헤더 추가
-    
+    st.header("시뮬레이션 설정")  # 헤더 추가
+
     # [수정] 이름과 지시사항 입력 필드 추가
     sim_name = st.text_input("시뮬레이션 사용자 이름", placeholder="예: 김철수")
-    sim_instructions = st.text_area("상황 및 지시사항", placeholder="예: 항공권 날짜를 다음주로 변경하고 싶음. 환불 수수료에 대해 불만이 있음.")
-    
-    st.divider() # 구분선
-    
+    sim_instructions = st.text_area(
+        "상황 및 지시사항",
+        placeholder="예: 항공권 날짜를 다음주로 변경하고 싶음. 환불 수수료에 대해 불만이 있음.",
+    )
+
+    st.divider()  # 구분선
+
     selected_model = st.selectbox(
         "OpenAI 모델을 선택해주세요.",
         ["gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
         index=0,
     )
-    
+
     clear_btn = st.button("대화 초기화")
-    
+
     execute_btn = st.button("시뮬레이션 실행")
 
 
@@ -244,7 +351,7 @@ def ask(query, name, instructions):
         st.session_state["thread_id"] = random_uuid()
 
     config = RunnableConfig(
-        recursion_limit=20, # 대화가 길어질 수 있으니 제한을 조금 늘림
+        recursion_limit=20,  # 대화가 길어질 수 있으니 제한을 조금 늘림
         configurable={"thread_id": st.session_state["thread_id"]},
     )
 
@@ -252,11 +359,11 @@ def ask(query, name, instructions):
     # graph.stream을 쓰면 노드 하나가 끝날 때마다 event를 반환합니다.
     events = graph.stream(
         {
-            "messages": [HumanMessage(content=query)], 
+            "messages": [HumanMessage(content=query)],
             "name": name,
-            "instructions": instructions
-        }, 
-        config=config
+            "instructions": instructions,
+        },
+        config=config,
     )
 
     # 3. 이벤트 루프: 각 노드(AI, 시뮬레이션 유저)의 출력을 실시간으로 처리
@@ -265,25 +372,30 @@ def ask(query, name, instructions):
             # values["messages"]에는 해당 노드가 반환한 메시지 리스트가 들어있습니다.
             # 예: [('assistant', '안녕하세요...')] 또는 [('user', '환불해주세요...')]
             if "messages" in values:
-                last_message = values["messages"][-1] 
-                
+                last_message = values["messages"][-1]
+
                 # 튜플 형태로 저장된 경우 (role, content) 분리
                 if isinstance(last_message, tuple):
                     role, content = last_message
                 else:
                     # LangChain Message 객체인 경우 (BaseMessage)
-                    role = "user" if isinstance(last_message, HumanMessage) else "assistant"
+                    role = (
+                        "user"
+                        if isinstance(last_message, HumanMessage)
+                        else "assistant"
+                    )
                     content = last_message.content
 
                 # 4. 역할에 맞게 화면에 즉시 출력
                 # role이 'user'면 시뮬레이션 고객, 'assistant'면 상담원
                 st_role = "user" if role == "user" else "assistant"
-                
+
                 with st.chat_message(st_role):
                     st.markdown(content)
-                
+
                 # 5. 세션 스테이트에 저장 (새로고침 시 유지용)
                 add_message(st_role, [MessageType.TEXT, content])
+
 
 # 메인 로직
 if clear_btn:
@@ -300,7 +412,9 @@ user_input = st.chat_input("시뮬레이션을 시작하려면 메시지를 입�
 if execute_btn:
     # 이름과 지시사항이 입력되었는지 확인
     if not sim_name.strip() or not sim_instructions.strip():
-        st.warning("⚠️ 사이드바에서 '시뮬레이션 사용자 이름'과 '상황 및 지시사항'을 모두 입력해주세요!")
+        st.warning(
+            "⚠️ 사이드바에서 '시뮬레이션 사용자 이름'과 '상황 및 지시사항'을 모두 입력해주세요!"
+        )
     else:
         # 강제로 "안녕하세요" 메시지를 보내 시뮬레이션 시작
         ask("안녕하세요", sim_name, sim_instructions)
@@ -310,6 +424,8 @@ if execute_btn:
 # [기존] 2. 사용자가 직접 채팅창에 입력했을 때 처리 로직
 if user_input:
     if not sim_name.strip() or not sim_instructions.strip():
-        st.warning("⚠️ 사이드바에서 '시뮬레이션 사용자 이름'과 '상황 및 지시사항'을 모두 입력해주세요!")
+        st.warning(
+            "⚠️ 사이드바에서 '시뮬레이션 사용자 이름'과 '상황 및 지시사항'을 모두 입력해주세요!"
+        )
     else:
         ask(user_input, sim_name, sim_instructions)

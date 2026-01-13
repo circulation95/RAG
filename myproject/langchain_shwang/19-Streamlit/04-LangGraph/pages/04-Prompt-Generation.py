@@ -40,9 +40,9 @@ from langchain_core.documents import Document
 from langchain_teddynote.tools.tavily import TavilySearch
 
 load_dotenv()
-logging.langsmith("Agent Simulation RAG")
+logging.langsmith("Prompt Generation")
 
-st.title("Agent Simulation RAG")
+st.title("Prompt Generation")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -313,7 +313,6 @@ def add_message(role: MessageRole, content: List[Union[MessageType, str]]):
 
 # --- 사이드바 설정 ---
 with st.sidebar:
-
     selected_model = st.selectbox(
         "OpenAI 모델을 선택해주세요.",
         ["gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
@@ -321,6 +320,10 @@ with st.sidebar:
     )
 
     clear_btn = st.button("대화 초기화")
+
+    if st.button("그래프 구조 보기"):
+        graph_img = st.session_state["graph"].get_graph().draw_mermaid_png()
+        st.image(graph_img)
 
 
 # 질문 처리 함수 (수정됨: name, instructions 전달)
@@ -411,7 +414,7 @@ if st.session_state["graph"] is None:
 
 print_messages()
 # 사용자 입력 처리 (채팅바)
-user_input = st.chat_input("시뮬레이션을 시작하려면 메시지를 입력하세요!")
+user_input = st.chat_input("프롬프트를 생성하려면 메시지를 입력하세요!")
 
 if user_input:
     ask(user_input)

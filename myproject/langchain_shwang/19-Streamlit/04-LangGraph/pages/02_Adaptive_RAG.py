@@ -54,7 +54,6 @@ class MessageType:
     """
     메시지 유형을 정의하는 클래스입니다.
     """
-
     TEXT = "text"  # 텍스트 메시지
     FIGURE = "figure"  # 그림 메시지
     CODE = "code"  # 코드 메시지

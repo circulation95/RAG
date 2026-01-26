@@ -34,8 +34,15 @@ load_dotenv()
 
 logging.langsmith("Hierarchial Agent")
 
-st.set_page_config(page_title="Hierarchial Agent", layout="wide")
+st.set_page_config(
+    page_title="🤖 Hierarchial Agent",
+    page_icon="💬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
 st.title("🤖 Hierarchial Agent")
+st.markdown("**`LangGraph`** 문서 기반으로 답변하는 봇입니다. ")
 
 # 멤버 Agent 목록 정의
 members = ["retrieve", "Researcher", "Coder"]
